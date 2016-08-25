@@ -1,0 +1,344 @@
+/************************************************
+ *
+ * Meddle Build Script
+ * v1.2
+ *
+ */
+
+
+import java.nio.file.CopyOption
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
+
+apply plugin: 'java'
+apply plugin: 'eclipse'
+apply plugin: 'idea'
+
+/*apply plugin: MeddlePlugin
+class MeddlePlugin implements Plugin<Project> {
+    void apply(Project project) {
+        project.extensions.create("meddle", MeddlePluginExtension)
+    }
+}*/
+
+configurations {
+  provided
+  getmc
+}
+
+sourceSets {
+    main { compileClasspath += configurations.provided }
+}
+
+
+project.extensions.add("meddle", MeddlePluginExtension)
+project.extensions.add("dynamicmappings", DynamicMappingsPluginExtension)
+project.extensions.add("meddleapi", MeddlePluginExtension)
+project.extensions.add("minecraft", MinecraftPluginExtension)
+
+project.extensions.add("greddle", GreddlePluginExtension)
+
+class MeddlePluginExtension {
+    String version
+    String location = null
+}
+
+class GreddlePluginExtension {
+    String cacheDir = 'cache/'
+}
+
+class DynamicMappingsPluginExtension extends MeddlePluginExtension {
+    boolean clearDefaultMappers = false
+    String[] mappers = []
+    String[] classpaths = []
+    boolean findUsedMappings = true
+}
+
+class MinecraftPluginExtension extends MeddlePluginExtension {
+    String assetIndex = '1.10'
+    String vmArgs = '-Xincgc -Xmx1024M -Xms1024M'        
+}
+
+
+project.ext {
+    mcJarFilename = "${->project.minecraft.version}.jar"
+    remappedJarFilename = "remapped-${->project.minecraft.version}.jar"
+}
+
+
+repositories {
+    maven {
+        //mavenCentral()
+        url "http://fybertech.net/maven/"
+        //url "https://libraries.minecraft.net/"
+    }
+}
+
+dependencies {
+    getmc "net.fybertech:greddle:1.0"
+    compile fileTree(dir:'cache/libraries', include: '*.jar')
+}
+
+
+buildscript {
+    repositories {
+        maven {
+            url "http://fybertech.net/maven/"
+        }
+    }
+    dependencies {
+        classpath "net.fybertech:greddle:1.0"
+    }
+}
+
+
+afterEvaluate {
+    println 'Using Minecraft ' + project.minecraft.version
+    println 'Using Meddle v' + project.meddle.version
+    println 'Using DynamicMappings ' + project.dynamicmappings.version
+    println 'Using MeddleAPI v' + project.meddleapi.version
+    println ''
+
+    if (project.meddle.location == null) {
+        dependencies { compile group: "net.fybertech", name: "meddle", version: "${project.meddle.version}" }
+    }
+    else {
+        dependencies { compile files(project.meddle.location) }
+    }
+
+    if (project.dynamicmappings.location == null) {
+        dependencies { compile group: "net.fybertech", name: "dynamicmappings", version: "${project.dynamicmappings.version}" }
+    }
+    else {
+        dependencies { compile files(project.dynamicmappings.location) }
+    }
+
+    if (project.meddleapi.location == null) {
+        dependencies { compile group: "net.fybertech", name: "meddleapi", version: "${project.meddleapi.version}" }
+    }
+    else {
+        dependencies { compile files(project.meddleapi.location) }
+    }
+
+    dependencies { runtime files(new File("${->project.greddle.cacheDir}", "${->project.ext.mcJarFilename}")) }
+    dependencies { provided files(new File("${->project.greddle.cacheDir}", "${->project.ext.remappedJarFilename}")) }
+}
+
+idea {
+    module {
+        scopes.PROVIDED.plus += [ configurations.provided ]
+    }
+}
+
+
+jar {
+    dependsOn('findMappings')
+}
+
+
+task findMappings(type: JavaExec, dependsOn:[classes]) {
+    main = 'net.fybertech.dynamicmappings.ModMappings'
+    args = [sourceSets.main.output.classesDir.getAbsolutePath(), sourceSets.main.output.resourcesDir.getAbsolutePath() + "/requiredmappings.cfg"]
+    doFirst {
+        // TODO - Look into why both jars needed
+        classpath = sourceSets.main.runtimeClasspath + configurations.provided
+    }
+    onlyIf { project.dynamicmappings.findUsedMappings }
+}
+
+
+/*task getMinecraft(type: JavaExec) {
+    main = 'net.fybertech.greddle.Greddle'
+    classpath = configurations.getmc  //files('greddle-1.0.jar')
+    args = ["${->project.minecraft.version}", "${->project.greddle.cacheDir}"]
+    outputs.dir { "${->project.greddle.cacheDir}" }
+}*/
+
+task getMinecraft {
+    doLast {
+        net.fybertech.greddle.Greddle.main(["${->project.minecraft.version}", "${->project.greddle.cacheDir}"] as String[])
+    }
+    outputs.dir { "${->project.greddle.cacheDir}" }
+}
+
+
+task remapMinecraft(type: JavaExec, dependsOn: 'getMinecraft') {
+    doFirst {
+        classpath files(new File(project.greddle.cacheDir, "${->project.minecraft.version}" + '.jar'))
+
+        configurations.compile.resolvedConfiguration.getResolvedArtifacts().each {
+            if (it.name.equals('meddle')) classpath it.getFile()
+            else if (it.name.equals('dynamicmappings')) classpath it.getFile()
+            else if (it.name.equals('meddleapi')) classpath it.getFile()
+        }
+
+        if (project.meddle.location != null) classpath project.meddle.location
+        if (project.meddleapi.location != null) classpath project.meddleapi.location
+        if (project.dynamicmappings.location != null) classpath project.dynamicmappings.location
+
+        classpath fileTree(new File("${->project.greddle.cacheDir}", 'libraries/'))
+
+        project.dynamicmappings.classpaths.each {
+            classpath files(new File(it))
+        }
+
+        args = ['-o', "${->project.greddle.cacheDir}/${->project.remappedJarFilename}"]
+        if (project.dynamicmappings.clearDefaultMappers) args += ['-clearmappers']
+        if (project.dynamicmappings.mappers.size() > 0) {
+            args += ['-addmappers', project.dynamicmappings.mappers.join(':')]
+        }
+    }
+    classpath sourceSets.main.resources.getSrcDirs()
+    main = 'net.fybertech.dynamicmappings.DynamicRemap'
+
+    inputs.file { files(new File("${->project.greddle.cacheDir}", "${->project.mcJarFilename}")) }
+    outputs.file { files(new File("${->project.greddle.cacheDir}", "${->project.remappedJarFilename}")) }
+}
+
+compileJava.dependsOn(remapMinecraft)
+
+
+task run(type: JavaExec) {
+    main = 'net.minecraft.launchwrapper.Launch'
+
+    args '--username', 'MeddleUser'
+    args '--version', '"meddle"'
+    args '--accessToken', '""'
+    args '--assetIndex', '"1.10"'
+    args '--userProperties', '{}'
+    args '--tweakClass', 'net.fybertech.meddle.Meddle'
+
+    ignoreExitValue true
+
+    workingDir 'instance'
+
+    doFirst {
+        File assetsDir = new File(net.fybertech.greddle.GreddleUtil.getMinecraftDirectory(), "assets")
+        args '--assetsDir', assetsDir.getAbsolutePath()
+        println 'Using assets at: ' + assetsDir.getAbsolutePath()
+
+        jvmArgs "-Djava.library.path=../${->project.greddle.cacheDir}/natives"
+
+        classpath files(new File(project.greddle.cacheDir, "${->project.minecraft.version}" + '.jar'))
+
+        configurations.compile.resolvedConfiguration.getResolvedArtifacts().each {
+            if (it.name.equals('meddle')) classpath it.getFile()
+            else if (it.name.equals('dynamicmappings')) classpath it.getFile()
+            else if (it.name.equals('meddleapi')) classpath it.getFile()
+        }
+
+        classpath fileTree(new File("${->project.greddle.cacheDir}", 'libraries/'))
+
+        if (project.meddle.location != null) classpath project.meddle.location
+        if (project.meddleapi.location != null) classpath project.meddleapi.location
+        if (project.dynamicmappings.location != null) classpath project.dynamicmappings.location
+    }
+}
+
+
+task setupEclipse(dependsOn: 'remapMinecraft') {
+    doLast {
+
+        // Generate the classpath file from available libs
+        File out = new File("eclipse/Meddle/.classpath")
+        out.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        out.append('<classpath>\n')
+        out.append('    <classpathentry kind="src" path="src/main/java"/>\n')
+        out.append('    <classpathentry kind="src" path="src/main/resources"/>\n')
+        out.append('    <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-1.6"/>\n')
+        out.append('    <classpathentry kind="output" path="bin"/>\n')
+
+
+        // Add cache/libraries/*
+        File libDir = new File("${->project.greddle.cacheDir}", 'libraries/')
+        fileTree(libDir).each {
+            String filename = it.getName()
+
+            // Skip native library archives
+            if (filename.contains('-natives-')) return
+
+            out.append('    <classpathentry kind="lib" path="cache/libraries/' + filename + '"')
+
+            // LWJGL and JInput need native libraries associated
+            if (filename.startsWith('lwjgl-') || filename.startsWith('jinput-')) {
+                out.append('>\n')
+                out.append('        <attributes>\n')
+                out.append('            <attribute name="org.eclipse.jdt.launching.CLASSPATH_ATTR_LIBRARY_PATH_ENTRY" value="Meddle/cache/natives"/>\n')
+                out.append('        </attributes>\n')
+                out.append('    </classpathentry>\n')
+            }
+            else {
+                out.append('/>\n')
+            }
+        }
+
+        // Add Meddle, DynamicMappings, and MeddleAPI from dependencies
+        configurations.compile.resolvedConfiguration.getResolvedArtifacts().each {
+            if (it.name.equals('meddle') || it.name.equals('dynamicmappings') || it.name.equals('meddleapi')) {
+                out.append('    <classpathentry kind="lib" path="' + it.getFile().getAbsolutePath() + '"/>\n')
+            }
+        }
+
+        // Add custom Meddle, DynamicMappings, and MeddleAPI paths
+        if (project.meddle.location != null) {
+            out.append('    <classpathentry kind="lib" path="' + (new File(project.meddle.location)).getAbsolutePath() + '"/>\n')
+        }
+        if (project.dynamicmappings.location != null) {
+            out.append('    <classpathentry kind="lib" path="' + (new File(project.dynamicmappings.location)).getAbsolutePath() + '"/>\n')
+        }
+        if (project.meddleapi.location != null) {
+            out.append('    <classpathentry kind="lib" path="' + (new File(project.meddleapi.location)).getAbsolutePath() + '"/>\n')
+        }
+
+        // Add remapped Minecraft jar
+        // TODO: sourcepath=""
+        out.append('    <classpathentry kind="lib" path="cache/remapped-' + project.minecraft.version + '.jar"/>\n')
+
+        out.append('</classpath>\n')
+        
+        
+        
+        //-----------------------------------------------------------        
+        // Write launch configuration
+        
+        String vmArgs = project.minecraft.vmArgs
+        String instanceDir = '${workspace_loc}/../instance';
+        String assetIndex = project.minecraft.assetIndex;
+        String assetsDir = (new File(net.fybertech.greddle.GreddleUtil.getMinecraftDirectory(), "assets")).getAbsolutePath()
+        String programArgs = '--username MeddleUser --version "meddle" --accessToken "0" --assetsDir "' + assetsDir + '" --assetIndex "' + assetIndex + '" --userProperties "{}" --tweakClass net.fybertech.meddle.Meddle';
+        String mcVersion = project.minecraft.version        
+        
+        vmArgs = vmArgs.replace("\"", '&quot;')
+        programArgs = programArgs.replace("\"", '&quot;')        
+        
+        out = new File("eclipse/.metadata/.plugins/org.eclipse.debug.core/.launches/Meddle.launch")
+        out.write('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n')
+        out.append('<launchConfiguration type="org.eclipse.jdt.launching.localJavaApplication">\n')
+        out.append('<listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_PATHS">\n')
+        out.append('<listEntry value="/Meddle/cache/libraries/launchwrapper-1.11.jar"/>\n')
+        out.append('</listAttribute>\n')
+        out.append('<listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_TYPES">\n')
+        out.append('<listEntry value="1"/>\n')
+        out.append('</listAttribute>\n')
+        out.append('<listAttribute key="org.eclipse.jdt.launching.CLASSPATH">\n')
+        out.append('<listEntry value="&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot; standalone=&quot;no&quot;?&gt;&#13;&#10;&lt;runtimeClasspathEntry containerPath=&quot;org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-1.6&quot; javaProject=&quot;Meddle&quot; path=&quot;1&quot; type=&quot;4&quot;/&gt;&#13;&#10;"/>\n')
+        out.append('<listEntry value="&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot; standalone=&quot;no&quot;?&gt;&#13;&#10;&lt;runtimeClasspathEntry internalArchive=&quot;/Meddle/cache/' + mcVersion + '.jar&quot; path=&quot;3&quot; type=&quot;2&quot;/&gt;&#13;&#10;"/>\n')
+        out.append('<listEntry value="&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot; standalone=&quot;no&quot;?&gt;&#13;&#10;&lt;runtimeClasspathEntry id=&quot;org.eclipse.jdt.launching.classpathentry.defaultClasspath&quot;&gt;&#13;&#10;&lt;memento exportedEntriesOnly=&quot;false&quot; project=&quot;Meddle&quot;/&gt;&#13;&#10;&lt;/runtimeClasspathEntry&gt;&#13;&#10;"/>\n')
+        out.append('</listAttribute>\n')
+        out.append('<booleanAttribute key="org.eclipse.jdt.launching.DEFAULT_CLASSPATH" value="false"/>\n')
+        out.append('<stringAttribute key="org.eclipse.jdt.launching.MAIN_TYPE" value="net.minecraft.launchwrapper.Launch"/>\n')
+        out.append('<stringAttribute key="org.eclipse.jdt.launching.PROGRAM_ARGUMENTS" value="' + programArgs + '"/>\n')
+        out.append('<stringAttribute key="org.eclipse.jdt.launching.PROJECT_ATTR" value="Meddle"/>\n')
+        out.append('<stringAttribute key="org.eclipse.jdt.launching.VM_ARGUMENTS" value="' + vmArgs + '"/>\n')
+        out.append('<stringAttribute key="org.eclipse.jdt.launching.WORKING_DIRECTORY" value="' + instanceDir + '"/>\n')
+        out.append('</launchConfiguration>\n')
+
+
+    }
+}
+
+
+task setup(dependsOn: ['remapMinecraft', 'setupEclipse']) {
+}
