@@ -11,6 +11,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
+import java.util.jar.JarOutputStream
 
 apply plugin: 'java'
 apply plugin: 'eclipse'
@@ -26,6 +27,10 @@ class MeddlePlugin implements Plugin<Project> {
 configurations {
   provided
   getmc
+  decompile
+  meddle_src
+  meddleapi_src
+  dynamicmappings_src
 }
 
 sourceSets {
@@ -43,6 +48,7 @@ project.extensions.add("greddle", GreddlePluginExtension)
 class MeddlePluginExtension {
     String version
     String location = null
+    String sourceLocation = null
 }
 
 class GreddlePluginExtension {
@@ -79,6 +85,7 @@ repositories {
 dependencies {
     getmc "net.fybertech:greddle:1.0"
     compile fileTree(dir:'cache/libraries', include: '*.jar')
+    decompile "net.fybertech:fernflower:082416"
 }
 
 
@@ -101,26 +108,29 @@ afterEvaluate {
     println 'Using MeddleAPI v' + project.meddleapi.version
     println ''
 
-    if (project.meddle.location == null) {
-        dependencies { compile group: "net.fybertech", name: "meddle", version: "${project.meddle.version}" }
-    }
-    else {
-        dependencies { compile files(project.meddle.location) }
-    }
+    if (project.meddle.location == null)
+         dependencies { compile group: "net.fybertech", name: "meddle", version: "${project.meddle.version}" }    
+    else dependencies { compile files(project.meddle.location) }    
 
-    if (project.dynamicmappings.location == null) {
-        dependencies { compile group: "net.fybertech", name: "dynamicmappings", version: "${project.dynamicmappings.version}" }
-    }
-    else {
-        dependencies { compile files(project.dynamicmappings.location) }
-    }
+    if (project.meddle.sourceLocation == null)
+         dependencies { meddle_src group: "net.fybertech", name: "meddle", version: "${project.meddle.version}", classifier: 'src' }    
+    
 
-    if (project.meddleapi.location == null) {
-        dependencies { compile group: "net.fybertech", name: "meddleapi", version: "${project.meddleapi.version}" }
-    }
-    else {
-        dependencies { compile files(project.meddleapi.location) }
-    }
+    if (project.dynamicmappings.location == null)
+         dependencies { compile group: "net.fybertech", name: "dynamicmappings", version: "${project.dynamicmappings.version}" }   
+    else dependencies { compile files(project.dynamicmappings.location) }
+    
+    if (project.dynamicmappings.sourceLocation == null)
+         dependencies { dynamicmappings_src group: "net.fybertech", name: "dynamicmappings", version: "${project.dynamicmappings.version}", classifier: 'src' }   
+    
+
+    if (project.meddleapi.location == null)
+         dependencies { compile group: "net.fybertech", name: "meddleapi", version: "${project.meddleapi.version}" }
+    else dependencies { compile files(project.meddleapi.location) }
+    
+    if (project.meddleapi.sourceLocation == null)
+         dependencies { meddleapi_src group: "net.fybertech", name: "meddleapi", version: "${project.meddleapi.version}", classifier: 'src' }
+
 
     dependencies { runtime files(new File("${->project.greddle.cacheDir}", "${->project.ext.mcJarFilename}")) }
     dependencies { provided files(new File("${->project.greddle.cacheDir}", "${->project.ext.remappedJarFilename}")) }
@@ -238,8 +248,55 @@ task run(type: JavaExec) {
 }
 
 
-task setupEclipse(dependsOn: 'remapMinecraft') {
-    doLast {
+
+task decompileMinecraft(type: JavaExec, dependsOn: 'remapMinecraft') {
+    main = 'org.jetbrains.java.decompiler.main.decompiler.ConsoleDecompiler'
+    classpath = configurations.decompile
+    args = ['-asc=1', '-rsy=1', '-log=ERROR', "${->project.greddle.cacheDir}/${->project.remappedJarFilename}", "${->project.greddle.cacheDir}/src"]
+    outputs.file { files(new File("${->project.greddle.cacheDir}/src/${->project.remappedJarFilename}")) }
+    
+    doFirst {
+        (new File("${->project.greddle.cacheDir}/src")).mkdirs()
+    }
+}
+
+
+
+
+
+task createDummyMeddleAPIMod(type: Jar) {
+    destinationDir file('instance/meddle/')
+    archiveName = 'meddleapi_dummy.jar'
+    manifest {
+        attributes('TweakClass' : 'net.fybertech.meddleapi.tweak.APITweaker')
+    }	        
+}
+
+task createDummyDynamicMappingsMod(type: Jar) {
+    destinationDir file('instance/meddle/')
+    archiveName = 'dynamicmappings_dummy.jar'
+    manifest {
+        attributes('TweakClass' : 'net.fybertech.dynamicmappings.Tweaker')
+    }	        
+}
+
+task createDummyMod(type: Jar) {
+    destinationDir file('instance/meddle/')
+    archiveName = 'mod_dummy.jar'
+    manifest {
+        attributes('TweakClass' : 'net.fybertech.examplemod.ExampleTweak')
+    }	        
+}
+
+
+task createAllDummyMods(dependsOn: ['createDummyMeddleAPIMod', 'createDummyDynamicMappingsMod', 'createDummyMod']) {    
+}
+
+
+
+task setupEclipse(dependsOn: ['remapMinecraft', 'decompileMinecraft', 'createDummyMods']) {
+    doLast {   
+        
 
         // Generate the classpath file from available libs
         File out = new File("eclipse/Meddle/.classpath")
@@ -273,28 +330,81 @@ task setupEclipse(dependsOn: 'remapMinecraft') {
                 out.append('/>\n')
             }
         }
-
-        // Add Meddle, DynamicMappings, and MeddleAPI from dependencies
-        configurations.compile.resolvedConfiguration.getResolvedArtifacts().each {
-            if (it.name.equals('meddle') || it.name.equals('dynamicmappings') || it.name.equals('meddleapi')) {
-                out.append('    <classpathentry kind="lib" path="' + it.getFile().getAbsolutePath() + '"/>\n')
+        
+        
+        // Get source locations for Meddle, DynamicMappings, and MeddleAPI
+        
+        String meddleSource = null
+        if (project.meddle.sourceLocation != null) meddleSource = (new File(project.meddle.sourceLocation)).getAbsolutePath()
+        else {
+            try {
+                ResolvedArtifact srcDep = configurations.meddle_src.resolvedConfiguration.getResolvedArtifacts().find { it.name.equals('meddle') }
+                meddleSource = srcDep.getFile().getAbsolutePath()
             }
+            catch (Exception e) {}
         }
+        
+        String dynamicmappingsSource = null
+        if (project.dynamicmappings.sourceLocation != null) dynamicmappingsSource = (new File(project.dynamicmappings.sourceLocation)).getAbsolutePath()
+        else {
+            try {
+                ResolvedArtifact srcDep = configurations.dynamicmappings_src.resolvedConfiguration.getResolvedArtifacts().find { it.name.equals('dynamicmappings') }
+                dynamicmappingsSource = srcDep.getFile().getAbsolutePath()
+            }
+            catch (Exception e) {}
+        }
+        
+        String meddleapiSource = null
+        if (project.meddleapi.sourceLocation != null) meddleapiSource = (new File(project.meddleapi.sourceLocation)).getAbsolutePath()
+        else {
+            try {
+                ResolvedArtifact srcDep = configurations.meddleapi_src.resolvedConfiguration.getResolvedArtifacts().find { it.name.equals('meddleapi') }
+                meddleapiSource = srcDep.getFile().getAbsolutePath()
+            }
+            catch (Exception e) {}
+        }
+                
+        
+         
 
-        // Add custom Meddle, DynamicMappings, and MeddleAPI paths
-        if (project.meddle.location != null) {
-            out.append('    <classpathentry kind="lib" path="' + (new File(project.meddle.location)).getAbsolutePath() + '"/>\n')
+        // Add Meddle, DynamicMappings, and MeddleAPI libraries
+        
+        String meddleJar = null
+        if (project.meddle.location == null) {
+            ResolvedArtifact artifact = configurations.compile.resolvedConfiguration.getResolvedArtifacts().find { it.name.equals('meddle') }
+            meddleJar = artifact.getFile().getAbsolutePath()
         }
-        if (project.dynamicmappings.location != null) {
-            out.append('    <classpathentry kind="lib" path="' + (new File(project.dynamicmappings.location)).getAbsolutePath() + '"/>\n')
+        else {
+            meddleJar = (new File(project.meddle.location)).getAbsolutePath()
         }
-        if (project.meddleapi.location != null) {
-            out.append('    <classpathentry kind="lib" path="' + (new File(project.meddleapi.location)).getAbsolutePath() + '"/>\n')
+        out.append('    <classpathentry kind="lib" path="' + meddleJar + '" sourcepath="' + meddleSource + '"/>\n')
+        
+        String dynamicmappingsJar = null
+        if (project.dynamicmappings.location == null) {
+            ResolvedArtifact artifact = configurations.compile.resolvedConfiguration.getResolvedArtifacts().find { it.name.equals('dynamicmappings') }
+            dynamicmappingsJar = artifact.getFile().getAbsolutePath()
         }
+        else {
+            dynamicmappingsJar = (new File(project.dynamicmappings.location)).getAbsolutePath()
+        }
+        out.append('    <classpathentry kind="lib" path="' + dynamicmappingsJar + '" sourcepath="' + dynamicmappingsSource + '"/>\n')
+        
+        String meddleapiJar = null
+        if (project.meddleapi.location == null) {
+            ResolvedArtifact artifact = configurations.compile.resolvedConfiguration.getResolvedArtifacts().find { it.name.equals('meddleapi') }
+            meddleapiJar = artifact.getFile().getAbsolutePath()
+        }
+        else {
+            meddleapiJar = (new File(project.meddle.location)).getAbsolutePath()
+        }
+        out.append('    <classpathentry kind="lib" path="' + meddleapiJar + '" sourcepath="' + meddleapiSource + '"/>\n')
+        
+        
+       
 
         // Add remapped Minecraft jar
-        // TODO: sourcepath=""
-        out.append('    <classpathentry kind="lib" path="cache/remapped-' + project.minecraft.version + '.jar"/>\n')
+        String sourcePath = "${->project.greddle.cacheDir}/src/${->project.remappedJarFilename}";        
+        out.append('    <classpathentry kind="lib" path="cache/remapped-' + project.minecraft.version + '.jar" sourcepath="' + sourcePath + '"/>\n')
 
         out.append('</classpath>\n')
         
