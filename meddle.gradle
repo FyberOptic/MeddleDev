@@ -1,7 +1,7 @@
 /************************************************
  *
  * Meddle Build Script
- * v1.2
+ * v1.3
  *
  */
 
@@ -38,14 +38,22 @@ sourceSets {
 }
 
 
+project.extensions.add("mod", ModPluginExtension)
 project.extensions.add("meddle", MeddlePluginExtension)
 project.extensions.add("dynamicmappings", DynamicMappingsPluginExtension)
-project.extensions.add("meddleapi", MeddlePluginExtension)
+project.extensions.add("meddleapi", MeddleAPIPluginExtension)
 project.extensions.add("minecraft", MinecraftPluginExtension)
-
 project.extensions.add("greddle", GreddlePluginExtension)
 
-class MeddlePluginExtension {
+class ModPluginExtension {
+    String id
+    String version
+    String filename = null
+    String tweakClass = null
+    String modClasses = null
+}
+
+class BasePluginExtension {
     String version
     String location = null
     String sourceLocation = null
@@ -55,14 +63,20 @@ class GreddlePluginExtension {
     String cacheDir = 'cache/'
 }
 
-class DynamicMappingsPluginExtension extends MeddlePluginExtension {
+class MeddlePluginExtension extends BasePluginExtension {
+}
+
+class MeddleAPIPluginExtension extends BasePluginExtension {
+}
+
+class DynamicMappingsPluginExtension extends BasePluginExtension {
     boolean clearDefaultMappers = false
     String[] mappers = []
     String[] classpaths = []
     boolean findUsedMappings = true
 }
 
-class MinecraftPluginExtension extends MeddlePluginExtension {
+class MinecraftPluginExtension extends BasePluginExtension {
     String assetIndex = '1.10'
     String vmArgs = '-Xincgc -Xmx1024M -Xms1024M'        
 }
@@ -134,6 +148,18 @@ afterEvaluate {
 
     dependencies { runtime files(new File("${->project.greddle.cacheDir}", "${->project.ext.mcJarFilename}")) }
     dependencies { provided files(new File("${->project.greddle.cacheDir}", "${->project.ext.remappedJarFilename}")) }
+    
+    project.jar {
+        baseName = project.mod.id
+        version = project.mod.version
+        
+        if (project.mod.filename != null) archiveName = project.mod.filename
+    
+        manifest {    
+    		if (project.mod.tweakClass != null) attributes('TweakClass' : project.mod.tweakClass)
+		    if (project.mod.modClasses != null) attributes('MeddleAPI-Mods' : project.mod.modClasses)
+	    }
+    }
 }
 
 idea {
@@ -283,9 +309,15 @@ task createDummyDynamicMappingsMod(type: Jar) {
 task createDummyMod(type: Jar) {
     destinationDir file('instance/meddle/')
     archiveName = 'mod_dummy.jar'
-    manifest {
-        attributes('TweakClass' : 'net.fybertech.examplemod.ExampleTweak')
-    }	        
+    
+    doFirst {
+        manifest {        
+            if (project.mod.tweakClass != null) attributes('TweakClass' : project.mod.tweakClass)
+            if (project.mod.modClasses != null) attributes('MeddleAPI-Mods' : project.mod.modClasses)
+        }
+    }
+    
+    outputs.upToDateWhen { false }
 }
 
 
@@ -294,7 +326,7 @@ task createAllDummyMods(dependsOn: ['createDummyMeddleAPIMod', 'createDummyDynam
 
 
 
-task setupEclipse(dependsOn: ['remapMinecraft', 'decompileMinecraft', 'createDummyMods']) {
+task setupEclipse(dependsOn: ['remapMinecraft', 'decompileMinecraft', 'createAllDummyMods']) {
     doLast {   
         
 
